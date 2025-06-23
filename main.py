@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Body, Form, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
-from pydantic import BaseModel, validator
+from pydantic import BaseModel, field_validator
 from motor.motor_asyncio import AsyncIOMotorClient
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -54,6 +54,7 @@ try:
     poets_collection = db["poets"]
     poems_collection = db["poems"]
     verses_collection = db["opening_verses"]
+    logger.info("Successfully connected to MongoDB")
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
     raise
@@ -66,6 +67,7 @@ try:
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         region_name=AWS_REGION
     )
+    logger.info("Successfully initialized S3 client")
 except ClientError as e:
     logger.error(f"Failed to initialize S3 client: {str(e)}")
     raise
@@ -81,7 +83,7 @@ class RegisterRequest(BaseModel):
     name: str
     email: str
     password: str
-    country: str  # Add country field
+    country: str
 
 class LoginRequest(BaseModel):
     email: str
@@ -105,13 +107,13 @@ class PoemCreate(BaseModel):
     submissionMethod: str
     inspiredBy: Optional[str] = None
 
-    @validator("type")
+    @field_validator("type")
     def validate_type(cls, v):
         if v not in ["individual", "full"]:
             raise ValueError("Type must be 'individual' or 'full'")
         return v
 
-    @validator("submissionMethod")
+    @field_validator("submissionMethod")
     def validate_submission_method(cls, v):
         if v not in ["manual", "upload", "recording"]:
             raise ValueError("Submission method must be 'manual', 'upload', or 'recording'")
@@ -151,7 +153,7 @@ class ApproveRequest(BaseModel):
 class RateRequest(BaseModel):
     rating: float
 
-    @validator("rating")
+    @field_validator("rating")
     def validate_rating(cls, v):
         if v < 0.5 or v > 5.0 or (v * 10) % 5 != 0:
             raise ValueError("Rating must be between 0.5 and 5.0 in 0.5 increments")
@@ -160,7 +162,7 @@ class RateRequest(BaseModel):
 class StatusUpdateRequest(BaseModel):
     status: str
 
-    @validator("status")
+    @field_validator("status")
     def validate_status(cls, v):
         if v not in ["araz_done", "araz_pending"]:
             raise ValueError("Status must be 'araz_done' or 'araz_pending'")
@@ -288,7 +290,7 @@ async def register_user(form_data: RegisterRequest):
             "userId": ObjectId(user_id),
             "name": form_data.name,
             "email": form_data.email,
-            "country": form_data.country,  # Use the provided country instead of hardcoding ""
+            "country": form_data.country,
             "points": 0,
             "poemsCount": 0,
             "bio": "",
@@ -560,14 +562,13 @@ async def get_poem(
 # Get best poems endpoint
 @app.get("/api/poems/best", response_model=PoemListResponse)
 async def get_best_poems(
-    limit: int = 3,  # Default to top 3
+    limit: int = 3,
     current_user: dict = Depends(get_current_user)
 ):
     query = {
         "approved": True,
-        "rating": {"$exists": True, "$ne": None}  # Ensure rating exists
+        "rating": {"$exists": True, "$ne": None}
     }
-    # Sort by rating in descending order and limit
     poems = await poems_collection.find(query).sort("rating", -1).limit(limit).to_list(limit)
 
     return {
@@ -735,13 +736,13 @@ class VerseCreate(BaseModel):
     language: str
     author: Optional[str] = None
 
-    @validator("day")
+    @field_validator("day")
     def validate_day(cls, v):
         if v < 1 or v > 10:
             raise ValueError("Day must be between 1 and 10")
         return v
 
-    @validator("language")
+    @field_validator("language")
     def validate_language(cls, v):
         allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
         if v not in allowed:
@@ -754,14 +755,14 @@ class VerseUpdate(BaseModel):
     language: Optional[str] = None
     author: Optional[str] = None
 
-    @validator("day", always=True)
-    def validate_day(cls, v):
+    @field_validator("day")
+    def validate_day(cls, v, info):
         if v is not None and (v < 1 or v > 10):
             raise ValueError("Day must be between 1 and 10")
         return v
 
-    @validator("language", always=True)
-    def validate_language(cls, v):
+    @field_validator("language")
+    def validate_language(cls, v, info):
         if v is not None:
             allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
             if v not in allowed:
@@ -880,7 +881,7 @@ async def add_araz(
 @app.patch("/api/poems/{poem_id}/feature", response_model=dict)
 async def feature_poem(
     poem_id: str,
-    feature_data: dict = Body(...),  # Expect { featured: bool }
+    feature_data: dict = Body(...),
     current_user: dict = Depends(get_admin_user)
 ):
     try:
@@ -901,7 +902,6 @@ async def feature_poem(
             {"$set": update_data}
         )
 
-        # Unfeature other poems if a new one is featured
         if featured:
             await poems_collection.update_many(
                 {"_id": {"$ne": ObjectId(poem_id)}, "featured": True},
@@ -921,7 +921,6 @@ async def get_leaderboard(
     if type not in ["individual", "full"]:
         raise HTTPException(status_code=400, detail="Type must be 'individual' or 'full'")
     
-    # Aggregate poets' data based on poem type
     pipeline = [
         {"$match": {"type": type, "approved": True}},
         {
@@ -935,7 +934,7 @@ async def get_leaderboard(
         {"$sort": {"totalStars": -1, "submissionCount": -1}}
     ]
     
-    leaderboard_data = await poems_collection.aggregate(pipeline).to_list(length=None)  # No limit to include all poets
+    leaderboard_data = await poems_collection.aggregate(pipeline).to_list(length=None)
     
     entries = [
         {
@@ -956,4 +955,12 @@ async def root():
 # Test endpoint
 @app.get("/test")
 async def test():
-    return {"status": "API is running"}
+    return {"message": "API is running"}
+
+# Startup
+import uvicorn
+
+if __name__ == "__main__":
+    port = int(os.getenv("PORT", 8000))
+    logger.info(f"Starting Uvicorn on port {port}")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
