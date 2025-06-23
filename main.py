@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Body, Form, status
+from fastapi import FastAPI, HTTPException, Depends, UploadFile, File, Body, Form, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel, field_validator
@@ -46,6 +46,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# Request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    logger.info(f"Received request: {request.method} {request.url}")
+    response = await call_next(request)
+    logger.info(f"Response status: {response.status_code}")
+    return response
+
 # MongoDB client
 try:
     client = AsyncIOMotorClient(MONGODB_URI)
@@ -53,7 +61,7 @@ try:
     users_collection = db["users"]
     poets_collection = db["poets"]
     poems_collection = db["poems"]
-    verses_collection = db["opening_verses"]
+    verses_collection = db["verses"]
     logger.info("Successfully connected to MongoDB")
 except Exception as e:
     logger.error(f"Failed to connect to MongoDB: {str(e)}")
@@ -67,7 +75,7 @@ try:
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
         region_name=AWS_REGION
     )
-    logger.info("Successfully initialized S3 client")
+    logger.info("Successfully connected to AWS S3")
 except ClientError as e:
     logger.error(f"Failed to initialize S3 client: {str(e)}")
     raise
@@ -183,6 +191,45 @@ class LeaderboardEntry(BaseModel):
 
 class LeaderboardResponse(BaseModel):
     entries: List[LeaderboardEntry]
+
+class VerseCreate(BaseModel):
+    content: str
+    day: int
+    language: str
+    author: Optional[str] = None
+
+    @field_validator("day")
+    def validate_day(cls, v):
+        if v < 1 or v > 10:
+            raise ValueError("Day must be between 1 and 10")
+        return v
+
+    @field_validator("language")
+    def validate_language(cls, v):
+        allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
+        if v not in allowed:
+            raise ValueError(f"Language must be one of {allowed}")
+        return v
+
+class VerseUpdate(BaseModel):
+    content: Optional[str] = None
+    day: Optional[int] = None
+    language: Optional[str] = None
+    author: Optional[str] = None
+
+    @field_validator("day")
+    def validate_day(cls, v):
+        if v is not None and (v < 1 or v > 10):
+            raise ValueError("Day must be between 1 and 10")
+        return v
+
+    @field_validator("language")
+    def validate_language(cls, v):
+        if v is not None:
+            allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
+            if v not in allowed:
+                raise ValueError(f"Language must be one of {allowed}")
+            return v
 
 # JWT functions
 def create_access_token(data: dict):
@@ -434,12 +481,12 @@ async def submit_poem_upload(
         "audioFileName": None,
         "arazContent": None,
         "arazFileName": None,
-        "inspiredBy": ObjectId(poem.inspiredBy) if poem.inspiredBy else None,
+        "inspiredBy": ObjectId(poem.inspired_id) if poem.inspiredBy else None,
         "featured": False,
         "createdAt": datetime.utcnow(),
         "updatedAt": datetime.utcnow()
     }
-    poem_doc["fileName" if file_type == "text" else "audioFileName"] = temp_path
+    poem_doc["fileName" if file_type == "text"] else "audioFileName"] = temp_path
 
     result = await poems_collection.insert_one(poem_doc)
     poem_id = str(result.inserted_id)
@@ -730,45 +777,6 @@ async def get_verses(
         logger.error(f"Error in get_verses: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Failed to fetch verses: {str(e)}")
 
-class VerseCreate(BaseModel):
-    content: str
-    day: int
-    language: str
-    author: Optional[str] = None
-
-    @field_validator("day")
-    def validate_day(cls, v):
-        if v < 1 or v > 10:
-            raise ValueError("Day must be between 1 and 10")
-        return v
-
-    @field_validator("language")
-    def validate_language(cls, v):
-        allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
-        if v not in allowed:
-            raise ValueError(f"Language must be one of {allowed}")
-        return v
-
-class VerseUpdate(BaseModel):
-    content: Optional[str] = None
-    day: Optional[int] = None
-    language: Optional[str] = None
-    author: Optional[str] = None
-
-    @field_validator("day")
-    def validate_day(cls, v, info):
-        if v is not None and (v < 1 or v > 10):
-            raise ValueError("Day must be between 1 and 10")
-        return v
-
-    @field_validator("language")
-    def validate_language(cls, v, info):
-        if v is not None:
-            allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
-            if v not in allowed:
-                raise ValueError(f"Language must be one of {allowed}")
-            return v
-
 # Add new verse
 @app.post("/api/verses", response_model=VerseResponse)
 async def add_verse(
@@ -957,10 +965,15 @@ async def root():
 async def test():
     return {"message": "API is running"}
 
+# Health check endpoint
+@app.get("/health")
+async def health():
+    return {"status": "healthy"}
+
 # Startup
 import uvicorn
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    logger.info(f"Starting Uvicorn on port {port}")
-    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
+    port = int(os.getenv("PORT", 8080))
+    logger.info(f"Starting Uvicorn on port {port}...")
+    uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="debug")
