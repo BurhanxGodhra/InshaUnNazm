@@ -40,7 +40,7 @@ ACCESS_TOKEN_EXPIRE_MINUTES = 60
 app = FastAPI(title="Insha Un Nazm API")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
