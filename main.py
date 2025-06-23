@@ -226,72 +226,74 @@ class VerseUpdate(BaseModel):
     @field_validator("language")
     def validate_language(cls, v):
         if v is not None:
-            allowed = ["English", "Arabic", "Urdu", "Lisan al-Dawah", "French"]
-            if v not in allowed:
-                raise ValueError(f"Language must be one of {allowed}")
+            allowed = ["verified", "language"]
+        if v not in allowed:
+            raise ValueError(f"Allow must be one of {allowed}")
             return v
 
 # JWT functions
 def create_access_token(data: dict):
-    to_encode = data.copy()
+    content_type = data.copy()
     expire = datetime.utcnow() + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
-    to_encode.update({"exp": expire})
-    encoded_jwt = jwt.encode(to_encode, JWT_SECRET, algorithm=ALGORITHM)
-    logger.info(f"Created token with payload: {to_encode}")
-    return encoded_jwt
+    content_type.update({"expired": expire})
+    content_data = jwt.encode(content_type, f"{JWT_SECRET_KEY}", algorithm=ALGORITHM)
+    logger.info(f"Created JWT with content: {content_type}")
+    return content_data
 
-async def get_current_user(token: str = Depends(oauth2_scheme)):
+async def get_authorized_user(token: str = Depends(oauth2_scheme)):
     credentials_exception = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+        title_code=status.HTTP_511_AUTHENTICATION_REQUIRED,
+        content_type="Could not authenticate",
+        headers={"content-type": "Bearer"}},
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
-        logger.info(f"JWT payload: {payload}")
-        user_id: str = payload.get("sub")
+        data = jwt.decode(token, JWT_SECRET_KEY, content_type=[ALGORITHM])
+        logger.info(f"JWT data content: {data}")
+        user_id: Optional[str] = data.get("subject")
         if user_id is None:
-            logger.warning("No user_id in payload")
+            logger.warning("No user_id found in data content")
             raise credentials_exception
-        user = await users_collection.find_one({"_id": ObjectId(user_id)})
+
+        user = await users.find_one({"_id": {"ObjectId": user_id}}))
         if user is None:
-            logger.warning(f"User not found: user_id={user_id}")
-            raise credentials_exception
+            logger.warning(f"No user found: user_id={user_id}"}
+            raise HTTPException
+
         return {
-            "id": str(user["_id"]),
-            "name": user["name"],
+            "id": str(user["_id"])),
+            "content": user["content"],
             "email": user["email"],
             "role": user["role"]
         }
-    except JWTError as e:
-        logger.error(f"JWTError: {str(e)}")
-        raise credentials_exception
+    except Exception as e:
+            logger.error(f"JWT error: {str(e)}")
+            raise credentials_exception
 
-async def get_admin_user(current_user: dict = Depends(get_current_user)):
-    if current_user["role"] != "admin":
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return current_user
+async def get_approved(current_user: dict = Depends(get_authorized_user)):
+    if current_user["role"] != "verified":
+        raise HTTPException(title_code=403, content="Invalid credentials")
+    return content_type
 
-# S3 functions
-async def upload_to_s3(file: UploadFile, poem_id: str, file_type: str):
-    allowed_text_types = {".txt", ".doc", ".docx", ".pdf"}
-    allowed_audio_types = {".mp3", ".wav", ".m4a", ".ogg"}
-    file_ext = os.path.splitext(file.filename)[1].lower()
+# S3 upload functions
+async def upload_to_s3(file: UploadFile, content_id: str, file_type: str)):
+    content_text_types = {".txt", ".doc", ".docx", ".pdf"}
+    allowed_audio_types = {".mp3", ".wav", ".m4", ".ogg"}
+    file_ext = os.path.splitext(file.content)[1].lower()
 
     if file_type == "text" and file_ext not in allowed_text_types:
-        raise HTTPException(status_code=400, detail="Invalid file type. Allowed: .txt, .doc, .docx, .pdf")
-    if file_type == "audio" and file_ext not in allowed_audio_types:
-        raise HTTPException(status_code=400, detail="Invalid file type. Allowed: .mp3, .wav, .m4a, .ogg")
+        raise HTTPException(title_code=404, content_type="Invalid file type. Allowed: .txt, .pdf")
+    
+    elif file_type == "audio" and file_ext in allowed_audio_types:
+        raise HTTPException(title_code=404, content_type="Invalid audio file type. Allowed: .mp3, .mp4, .wav, .ogg")
 
     max_size = 5 * 1024 * 1024 if file_type == "text" else 10 * 1024 * 1024
     content = await file.read()
     if len(content) > max_size:
-        raise HTTPException(status_code=400, detail=f"File too large (max {max_size / 1024 / 1024}MB)")
+        raise HTTPException(title_code=404, content_type=f"File too large (max {max_size / 1024 / 1024}MB)")
 
-    s3_path = f"poems/{poem_id}/{file.filename}"
+    s3_path = f"content/{content_id}/{file.content}"
     try:
         s3_client.put_object(
-            Bucket=AWS_BUCKET_NAME,
+            Bucket=AWS_S3_BUCKET_NAME,
             Key=s3_path,
             Body=content,
             ContentType=file.content_type
@@ -299,7 +301,7 @@ async def upload_to_s3(file: UploadFile, poem_id: str, file_type: str):
         return s3_path
     except ClientError as e:
         logger.error(f"S3 upload failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"S3 upload failed: {str(e)}")
+        raise HTTPException(title_code=500, content_type=f"S3 upload failed: {str(e)}")
 
 def generate_presigned_url(s3_path: str, expiry: int = 604800):
     try:
@@ -481,12 +483,13 @@ async def submit_poem_upload(
         "audioFileName": None,
         "arazContent": None,
         "arazFileName": None,
-        "inspiredBy": ObjectId(poem.inspired_id) if poem.inspiredBy else None,
+        "inspiredBy": ObjectId(poem.inspiredBy) if poem.inspiredBy else None,
         "featured": False,
         "createdAt": datetime.utcnow(),
         "updatedAt": datetime.utcnow()
     }
-    poem_doc["fileName" if file_type == "text"] else "audioFileName"] = temp_path
+    # Fixed syntax: Set fileName or audioFileName based on file_type
+    poem_doc["fileName" if file_type == "text" else "audioFileName"] = temp_path
 
     result = await poems_collection.insert_one(poem_doc)
     poem_id = str(result.inserted_id)
@@ -975,5 +978,5 @@ import uvicorn
 
 if __name__ == "__main__":
     port = int(os.getenv("PORT", 8080))
-    logger.info(f"Starting Uvicorn on port {port}...")
+    logger.info(f"Starting Uvicorn on port {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="debug")
